@@ -1,0 +1,75 @@
+diff --git a/Makefile b/Makefile
+index abcd6c1..9e3a0ad 100644
+--- a/Makefile
++++ b/Makefile
+@@ -84,7 +84,7 @@ all: format $(addsuffix -el.elf,$(TARGETS)) $(addsuffix -eb.elf,$(TARGETS)) gene
+ generate: export BPF_CLANG := $(CLANG)
+ generate: export BPF_CFLAGS := $(CFLAGS)
+ generate:
+-	go generate ./...
++	HTTPS_PROXY=socks5://172.17.0.1:1080 HTTP_PROXY=socks5://172.17.0.1:1080 ALL_PROXY=socks5://172.17.0.1:1080 go generate ./...
+ 
+ testdata/loader-%-el.elf: testdata/loader.c
+ 	$* $(CFLAGS) -target bpfel -c $< -o $@
+diff --git a/info.go b/info.go
+index a02e8a4..3ed7cd7 100644
+--- a/info.go
++++ b/info.go
+@@ -92,7 +92,8 @@ type ProgramInfo struct {
+ 	// Truncated hash of the BPF bytecode. Available from 4.13.
+ 	Tag string
+ 	// Name as supplied by user space at load time. Available from 4.15.
+-	Name string
++	Name     string
++	FuncInfo FuncInfo
+ 
+ 	createdByUID     uint32
+ 	haveCreatedByUID bool
+@@ -103,8 +104,17 @@ type ProgramInfo struct {
+ 	insns []byte
+ }
+ 
++type FuncInfo struct {
++	InsnOff uint32
++	TypeID  uint32
++}
++
+ func newProgramInfoFromFd(fd *sys.FD) (*ProgramInfo, error) {
+ 	var info sys.ProgInfo
++	funcInfo := FuncInfo{}
++	info.NrFuncInfo = 1
++	info.FuncInfo = uint64(uintptr(unsafe.Pointer(&funcInfo)))
++	info.FuncInfoRecSize = uint32(unsafe.Sizeof(funcInfo))
+ 	err := sys.ObjInfo(fd, &info)
+ 	if errors.Is(err, syscall.EINVAL) {
+ 		return newProgramInfoFromProc(fd)
+@@ -115,10 +125,12 @@ func newProgramInfoFromFd(fd *sys.FD) (*ProgramInfo, error) {
+ 
+ 	pi := ProgramInfo{
+ 		Type: ProgramType(info.Type),
+-		id:   ProgramID(info.Id),
+-		Tag:  hex.EncodeToString(info.Tag[:]),
+-		Name: unix.ByteSliceToString(info.Name[:]),
+-		btf:  btf.ID(info.BtfId),
++
++		id:       ProgramID(info.Id),
++		Tag:      hex.EncodeToString(info.Tag[:]),
++		FuncInfo: funcInfo,
++		Name:     unix.ByteSliceToString(info.Name[:]),
++		btf:      btf.ID(info.BtfId),
+ 		stats: &programStats{
+ 			runtime:  time.Duration(info.RunTimeNs),
+ 			runCount: info.RunCnt,
+diff --git a/prog.go b/prog.go
+index 70aaef5..1dbeaee 100644
+--- a/prog.go
++++ b/prog.go
+@@ -999,7 +999,7 @@ func findTargetInProgram(prog *Program, name string, progType ProgramType, attac
+ 
+ 	var typeName string
+ 	switch (match{progType, attachType}) {
+-	case match{Extension, AttachNone}:
++	case match{Extension, AttachNone}, match{Tracing, AttachTraceFEntry}, match{Tracing, AttachTraceFExit}:
+ 		typeName = name
+ 	default:
+ 		return 0, errUnrecognizedAttachType
