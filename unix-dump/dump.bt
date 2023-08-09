@@ -1,0 +1,48 @@
+k:unix_stream_sendmsg {
+    $found = 0;
+
+    $sk=*(int64*)(arg0+24);
+    $addr=*(int64*)($sk+792);
+    $addr_name=$addr+12;
+    if (str($addr_name+2) == "/var/run/docker.sock") {
+        $found = 1;
+        $sender_mark = " *";
+    }
+
+    $peer=*(int64*)($sk+880);
+    $paddr=*(int64*)($peer+792);
+    $paddr_name=$paddr+12;
+    if (str($paddr_name+2) == "/var/run/docker.sock") {
+        $found = 1;
+        $recver_mark = " *";
+    }
+    if ($found == 0) {
+        return;
+    }
+
+    $sk_peer_pid = *(int64*)($sk+600);
+    $peer_pid = *(int64*)($sk_peer_pid+96);
+    printf("\n\n%d%s -> %d%s\n", pid, $sender_mark, $peer_pid, $recver_mark);
+
+    $iov = *(uint64)(arg1+40);
+    $nr_segs = *(int32*)(arg1+48);
+    $i = 0;
+    unroll(10) {
+        $iov_base = *(int64*)$iov;
+        $iov_len = *(int64*)($iov+8);
+        $j = 0;
+        while($j <= 100) {
+            printf("%s", str($iov_base));
+            $iov_base = $iov_base + 64;
+            $j = $j + 1;
+            if ($j*64 >= $iov_len) {
+                break;
+            }
+        }
+        $iov = $iov + 16;
+        $i = $i + 1;
+        if ($i >= $nr_segs) {
+            return;
+        }
+    }
+}

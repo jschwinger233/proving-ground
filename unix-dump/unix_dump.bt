@@ -1,0 +1,35 @@
+kfunc:vmlinux:unix_stream_sendmsg {
+    $this = (struct unix_sock*)args->sock->sk;
+    $name = (struct sockaddr_un*)$this->addr->name;
+
+    $peer = (struct unix_sock*)$this->peer;
+    $peer_name = (struct sockaddr_un*)$peer->addr->name;
+
+    if (str((uint8*)$name->sun_path) != str($1) && str((uint8*)$peer_name->sun_path) != str($1)) {
+        return;
+    }
+
+    printf("\n\npid: %d -> %d\n", pid, args->sock->sk->sk_peer_pid->numbers[0].nr);
+
+    $iov = args->msg->msg_iter.iov;
+    $nr_segs = (int64)args->msg->msg_iter.nr_segs;
+
+    $i = 0;
+    unroll(5) {
+        $iov_base = (uint8*)$iov->iov_base;
+        $iov_len = (int64)$iov->iov_len;
+        unroll (60) {
+            printf("%s", str(uptr($iov_base), $iov_len > 128 ? 128 : $iov_len));
+            $iov_base = $iov_base + 128;
+            $iov_len = $iov_len - 128;
+            if ($iov_len <= 0) {
+                return;
+            }
+        }
+        $iov = $iov + 1;
+        $i++;
+        if ($i >= $nr_segs) {
+            return;
+        }
+    }
+}
