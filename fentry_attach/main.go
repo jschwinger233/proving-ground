@@ -9,78 +9,73 @@ import (
 	"syscall"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -no-strip -target native bpf ./bpf.c -- -I./headers -Wall
 
+// ./fentry_attach <prog_id1> <func_name1> <prog_id2> <func_name2>
 func main() {
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
 
-	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal(err)
 	}
 
-	// Load pre-compiled programs and maps into the kernel.
 	spec, err := loadBpf()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	progID, err := strconv.Atoi(os.Args[1])
+	progID1, err := strconv.Atoi(os.Args[1])
 	if err != nil {
 		log.Fatal(err)
 	}
-	targetProg, err := ebpf.NewProgramFromID(ebpf.ProgramID(progID))
+	funcname1 := os.Args[2]
+	progID2, err := strconv.Atoi(os.Args[3])
 	if err != nil {
 		log.Fatal(err)
 	}
-	spec.Programs["trace_on_entry"].AttachTarget = targetProg
-	targetInfo, err := targetProg.Info()
-	if err != nil {
-		log.Fatal(err)
-	}
-	btfID, ok := targetInfo.BTFID()
-	if !ok {
-		log.Fatal("no btf id")
-	}
-	handle, err := btf.NewHandleFromID(btfID)
-	if err != nil {
-		log.Fatal(err)
-	}
-	btfSpec, err := handle.Spec(nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	ty, err := btfSpec.TypeByID(btf.TypeID(targetInfo.FuncInfo.TypeID))
-	if err != nil {
-		log.Fatal(err)
-	}
-	funcType, ok := ty.(*btf.Func)
-	if !ok {
-		log.Fatal("not a func")
-	}
-	spec.Programs["trace_on_entry"].AttachTo = funcType.Name
-	println(targetInfo.Name, funcType.Name)
+	funcname2 := os.Args[4]
 
-	objs := bpfObjects{}
-	if err := spec.LoadAndAssign(&objs, nil); err != nil {
-		fmt.Printf("%+v\n", err)
+	attach := func(progID int, funcname string) (err error, closers []func() error) {
+		targetProg, err := ebpf.NewProgramFromID(ebpf.ProgramID(progID))
+		if err != nil {
+			return
+		}
+		spec.Programs["trace_on_entry"].AttachTarget = targetProg
+		spec.Programs["trace_on_entry"].AttachTo = funcname
+
+		objs := bpfObjects{}
+		if err = spec.LoadAndAssign(&objs, nil); err != nil {
+			return
+		}
+		closers = append(closers, objs.Close)
+
+		link, err := link.AttachTracing(link.TracingOptions{
+			Program: objs.bpfPrograms.TraceOnEntry,
+		})
+		if err != nil {
+			return
+		}
+		closers = append(closers, link.Close)
 		return
 	}
-	defer objs.Close()
 
-	link, err := link.AttachTracing(link.TracingOptions{
-		Program: objs.bpfPrograms.TraceOnEntry,
-	})
+	err, closers1 := attach(progID1, funcname1)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer link.Close()
+	err, closers2 := attach(progID2, funcname2)
+	if err != nil {
+		log.Fatal(err)
+	}
 
+	fmt.Println("Attached, press Ctrl+C to stop")
 	<-stopper
+	for _, closer := range append(closers1, closers2...) {
+		closer()
+	}
 }
