@@ -5,12 +5,13 @@
 #include "bpf_core_read.h"
 #include "bpf_endian.h"
 #include "bpf_helpers.h"
+#include "socket_defs.h"
 
-static const bool TRUE = true;
-
-struct bpf_param {
-  __u32 tproxy_pid;
+struct config {
+	char comm[16];
 };
+
+static volatile const struct config CFG = {};
 
 struct tuple {
 	__be32 saddr;
@@ -36,37 +37,27 @@ struct {
 SEC("sockops")
 int tcp_sockops(struct bpf_sock_ops *skops)
 {
+	// only interested in ipv4
+	if (skops->family != AF_INET)
+		return 0;
+
+	char comm[16];
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+	BPF_CORE_READ_STR_INTO(&comm, task, comm);
+	if (bpf_strncmp(comm, 16, (void *)CFG.comm) != 0)
+		return 0;
+
 	struct tuple tuple = {};
 	tuple.saddr = skops->local_ip4;
 	tuple.daddr = skops->remote_ip4;
-	tuple.sport = skops->local_port;
-	tuple.dport = bpf_ntohl(skops->remote_port);
+	tuple.sport = bpf_htonl(skops->local_port) >> 16;
+	tuple.dport = skops->remote_port >> 16;
 
-	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-	__u32 task_pid = BPF_CORE_READ(task, pid);
 	switch (skops->op) {
 
-	case BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB: // proxy
-		// lookup some map to make sure it's proxy connection
-		if (task_pid) { // then it's a local connection!
-			struct tuple rev_tuple = {};
-			rev_tuple.saddr = tuple.daddr;
-			rev_tuple.daddr = tuple.saddr;
-			rev_tuple.sport = tuple.dport;
-			rev_tuple.dport = tuple.sport;
-			if (bpf_map_lookup_elem(&local_sock, &rev_tuple)) {
-				bpf_sock_hash_update(skops, &fast_sock, &tuple, BPF_ANY);
-			} else {
-				bpf_map_delete_elem(&fast_sock, &rev_tuple);
-			}
-		}
-		break;
-
-	case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB: // client
-		if (task_pid) { // then it's a local connection
-			bpf_sock_hash_update(skops, &fast_sock, &tuple, BPF_ANY);
-			bpf_map_update_elem(&local_sock, &tuple, &TRUE, BPF_ANY);
-		}
+	case BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB:
+	case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB:
+		bpf_sock_hash_update(skops, &fast_sock, &tuple, BPF_ANY);
 		break;
 
 	default:
@@ -82,11 +73,13 @@ int sk_msg_fast_redirect(struct sk_msg_md *msg)
 	struct tuple rev_tuple = {};
 	rev_tuple.saddr = msg->remote_ip4;
 	rev_tuple.daddr = msg->local_ip4;
-	rev_tuple.sport = bpf_ntohl(msg->remote_port);
-	rev_tuple.dport = msg->local_port;
+	rev_tuple.sport = msg->remote_port >> 16;
+	rev_tuple.dport = bpf_htonl(msg->local_port) >> 16;
 
-	bpf_msg_redirect_hash(msg, &fast_sock, &rev_tuple, BPF_F_INGRESS);
-	return SK_PASS;
+	bpf_printk("tcp fast redirect: %pI4:%lu -> %pI4:%lu",
+		&rev_tuple.daddr, bpf_ntohs(rev_tuple.dport),
+		&rev_tuple.saddr, bpf_ntohs(rev_tuple.sport));
+	return bpf_msg_redirect_hash(msg, &fast_sock, &rev_tuple, BPF_F_INGRESS);
 }
 
 SEC("license") const char __license[] = "Dual BSD/GPL";

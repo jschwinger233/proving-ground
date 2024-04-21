@@ -15,9 +15,31 @@ import (
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -no-strip -target native bpf ./bpf.c -- -I./headers -I. -Wall
 
 func main() {
+	if len(os.Args) != 2 {
+		log.Printf("Usage: %s [comm]\ne.g. run \"%s curl\" to bpf_msg_redirect local TCP segment from curl", os.Args[0], os.Args[0])
+		os.Exit(1)
+	}
+
+	comm := os.Args[1]
+	if len(comm) > 16 {
+		log.Fatalf("comm must be less than 16 characters")
+	}
+
 	spec, err := loadBpf()
 	if err != nil {
 		log.Fatalf("Failed to load BPF: %v\n", err)
+	}
+
+	c := [16]byte{}
+	copy(c[:], comm)
+	if err := spec.RewriteConstants(map[string]interface{}{
+		"CFG": struct {
+			comm [16]byte
+		}{
+			comm: c,
+		},
+	}); err != nil {
+		log.Fatalf("Failed to rewrite constants: %v\n", err)
 	}
 
 	var opts ebpf.CollectionOptions
@@ -38,7 +60,7 @@ func main() {
 
 	cg, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    "/sys/fs/cgroup",
-		Program: objs.TcpSockops, // todo@gray: rename
+		Program: objs.TcpSockops,
 		Attach:  ebpf.AttachCGroupSockOps,
 	})
 	if err != nil {
@@ -54,6 +76,7 @@ func main() {
 		log.Fatalf("failed to attach sk_skb stream verdict: %w", err)
 	}
 
+	println("Press CTRL+C to stop")
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	<-ctx.Done()
